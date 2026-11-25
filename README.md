@@ -272,11 +272,11 @@ What to check about signatures:
 - each member has signing set up (`git config commit.gpgsign`, `gpg.format`, `user.signingkey`) with a GPG, SSH or S/MIME key, and the public key is added to their account on the platform;
 - the private signing key is protected: a hardware key or a passphrase. The key is not in the repository and is not stored in CI secrets unless needed;
 - commits from bots and release jobs are signed too. If they have an exception from the signature rule, this is a high priority finding: the exception is a way around the rule;
-- **commits made through the platform interface** (the web editor, the merge and rebase buttons, the API) are allowed on one condition only: the platform signs them with its own key and shows them as verified. Such a commit counts as signed: it confirms that an account that logged in to the platform made it. This is why the account protection from step 16 is required here. If the platform lets such commits through without a signature, this is a high priority finding. The fix is to turn on signing by the platform. If that is not possible, forbid changes through the interface: members commit and rebase only locally, and merging is done in a way that does not create an unsigned commit. Check how this works on the user's platform in its documentation. At the time of writing: GitHub always signs such commits; GitLab by default lets them through unsigned until the "Sign web-based commits" setting is turned on in the group or project, and rebasing a PR from the GitLab interface removes signatures from already signed commits
+- **commits made through the platform interface** (the web editor, the merge and rebase buttons, the API) are allowed on one condition only: the platform signs them with its own key and shows them as verified. Such a commit counts as signed: it confirms that an account that logged in to the platform made it. This is why the account protection from step 16 is required here. A stolen token with write access can also create commits through the platform API, and the platform signs them as verified, so platform-signed commits alone do not protect against a stolen token: in a team repository, review by another person and `require_last_push_approval` stay essential, and tokens must be restricted (step 16). If the platform lets such commits through without a signature, this is a high priority finding. The fix is to turn on signing by the platform. If that is not possible, forbid changes through the interface: members commit and rebase only locally, and merging is done in a way that does not create an unsigned commit. Check how this works on the user's platform in its documentation. At the time of writing: GitHub always signs such commits; GitLab by default lets them through unsigned until the "Sign web-based commits" setting is turned on in the group or project, and rebasing a PR from the GitLab interface removes signatures from already signed commits
 
 If signing is not set up, in the fix plan first suggest setting up signing for all members and bots, and only then turning on the required rule. In the reverse order the platform will start rejecting members' commits
 
-A missing requirement from 1-7 is a high priority finding. In addition, with low priority: `CODEOWNERS` with required review by code owners, and resolving all discussions before the merge
+A missing requirement from 1-7 is a high priority finding. Release tags must also be protected if tags trigger a release, publish or deployment. Otherwise anyone with write access can push or move a tag to an unreviewed commit and trigger the pipeline without touching the main branch. Protect release tag patterns with platform rulesets or protected tags so that only the release process can create them, and forbid deleting or moving existing tags. Missing tag protection for release tags is a high priority finding. In addition, with low priority: `CODEOWNERS` with required review by code owners, and resolving all discussions before the merge
 
 How to check on GitHub:
 
@@ -286,7 +286,7 @@ gh api repos/{owner}/{repo}/rules/branches/<main-branch>
 gh api repos/{owner}/{repo}/branches/<main-branch>/protection
 ```
 
-In the response look for: `required_approving_review_count >= 1`, `dismiss_stale_reviews: true` (in rulesets: `dismiss_stale_reviews_on_push`), `require_last_push_approval: true`, `enforce_admins`, `required_status_checks`, `allow_force_pushes: false`, `required_signatures` turned on, an empty bypass list (`bypass_actors`)
+In the response look for: `required_approving_review_count >= 1`, `dismiss_stale_reviews: true` (in rulesets: `dismiss_stale_reviews_on_push`), `require_last_push_approval: true`, `enforce_admins`, `required_status_checks`, `allow_force_pushes: false`, `required_signatures` turned on, an empty bypass list (`bypass_actors`), and tag rulesets when tags trigger releases
 
 The same settings on other platforms:
 
@@ -355,7 +355,7 @@ What else to check:
 - Whether a local Betterleaks pre-commit hook exists (the official repository has `.pre-commit-hooks.yaml`). It adds to the CI check but does not replace it
 - A valid secret that you found is a critical finding. It is compromised: the user must revoke it and issue a new one. Removing it from the code is not enough: the secret stays in the git history
 - Check that `.env`, keys and certificates are listed in `.gitignore`, and that in CI secrets come from the secret store and are not printed to logs
-- For access from CI to the cloud, short-lived tokens through OIDC must be used (AWS, Azure, GCP, Vault), not long-lived keys in repository secrets
+- For access from CI to the cloud, short-lived tokens through OIDC must be used (AWS, Azure, GCP, Vault), not long-lived keys in repository secrets. Check the cloud trust policy too: the role must accept tokens only from the exact repository, the protected branch, protected tag or protected environment, and the exact workflow where supported. A wildcard trust policy that lets any branch or any repository in the organization assume a deployment role is a high priority finding
 
 ## Step 9. Security of the pipeline itself
 
@@ -366,9 +366,10 @@ The pipeline runs code with access to secrets and with the right to publish. So 
 - **Data from a PR is not put into shell commands.** The PR title, the branch name, the comment text and the commit message are set by the PR author. Such values are passed to a script only through environment variables (GitHub: do not write `${{ github.event.* }}` inside `run:`; GitLab: do not put `$CI_MERGE_REQUEST_TITLE`, `$CI_COMMIT_MESSAGE` and similar values into `eval` or into strings that are executed again)
 - **Code from someone else's PR does not run with access to secrets.** A high priority finding: an event with main branch permissions that builds or runs code from a PR (GitHub: `pull_request_target` or `workflow_run` together with a checkout of the PR code; GitLab: pipelines for PRs from forks that run in the parent project)
 - **PRs from forks do not get secrets,** and their pipelines start only after a project member approves
+- **Infrastructure and deployment secrets are not exposed to unreviewed branches.** A high priority finding: storing deployment credentials, cloud keys or publish tokens as organization-level or repository-level secrets that any branch or internal PR can read. With a stolen developer token, an attacker does not need to merge to the main branch: pushing a feature branch that edits the workflow or a build script is enough to dump every secret available to that job. Keep such secrets only inside protected environments restricted to the main branch or protected release tags
 - **Self-hosted build agents are isolated.** They are not used in a public repository. In a private one an agent is created for one build and destroyed after it
 - **The cache is not shared** between PR builds and jobs that can publish or deploy
-- **Deployment to production is protected:** a separate environment with its own secrets, a manual approval, and runs only from the main branch
+- **Deployment to production is protected** (high priority): a separate environment with its own secrets, restricted to the main branch or protected release tags, with manual approval by another person and self-approval turned off (GitHub: `prevent_self_review` on the environment; check with `gh api repos/{owner}/{repo}/environments`). Manual triggers such as `workflow_dispatch` must not allow deploying from an arbitrary branch. Non-production environments that reach real infrastructure must use separate credentials that cannot access production data or services
 - **Changes to pipeline files are reviewed:** their folder is listed in `CODEOWNERS`. On platforms without such a file it is protected by branch rules
 - **A linter checks the pipeline files** in a blocking check (step 5)
 
@@ -505,7 +506,7 @@ cosign verify <image>@sha256:<digest> \
 
 The values of `--certificate-identity` and `--certificate-oidc-issuer` depend on the CI system: for GitLab the issuer is the address of the GitLab instance (for gitlab.com: `https://gitlab.com`). Take them from the Sigstore documentation for the user's CI
 
-Places to verify: the deployment job, an admission controller in Kubernetes (Kyverno, Sigstore policy-controller), a registry policy. If the image is signed but not verified anywhere, this is a separate finding
+Places to verify: the deployment job, an admission controller in Kubernetes (Kyverno, Sigstore policy-controller), a registry policy. Verification before production deployment must be blocking (enforce mode, not audit or warn), so an image built from an unreviewed branch or outside the approved workflow cannot be deployed. If the image is signed but not verified in a blocking way before production deployment, this is a high priority finding
 
 Accepted alternatives:
 
@@ -710,7 +711,7 @@ Priorities: debug mode or a debug build in production - high; test accounts or f
 Check each item. If it is missing, this is a finding with the priority given in brackets:
 
 - **SBOM for artifacts that are not images** (packages, binaries, release archives): CycloneDX or SPDX on every release, with the file attached to the release (medium, if the project publishes such artifacts)
-- **Signing and provenance of other artifacts** (packages, binaries, release archives): Sigstore Cosign, build attestations (medium, if the project publishes such artifacts)
+- **Signing, provenance and verification of other artifacts** (packages, binaries, release archives): Sigstore Cosign, build attestations, with blocking verification before production deployment so only artifacts built from the protected branch or tag are deployed (medium, if the project publishes such artifacts)
 - **Dependency license check** (medium, if the project is distributed outside the organization; otherwise low) - the requirements are below
 - **`SECURITY.md`** that says how to report vulnerabilities (low; the private channel for such reports is in step 13)
 - **Account protection** for everyone with write access (high) - the requirements are below
@@ -741,17 +742,19 @@ Report which licenses were found and what terms they set. The user decides wheth
 
 ### Account protection
 
-Whoever gets into an account with write access goes around all the checks in this file. Two-factor authentication with a code is not enough: a user can type a code from SMS or from an app into a fake site. For everyone who has write access to the repository, to CI settings and to package and image registries:
+Whoever gets into an account with write access goes around all the checks in this file. Two-factor authentication with a code is not enough: a user can type a code from SMS or from an app into a fake site. Passkeys protect only interactive login - a stolen token bypasses them. For everyone who has write access to the repository, to CI settings and to package and image registries:
 
 - **login with a passkey** - it is tied to the site address and does not work on a fake page;
 - **not one passkey but at least two, on independent devices** (for example, a password manager and a hardware key). If there is one passkey and it is lost, the user loses access or has to turn on a less protected login method;
 - **passkeys are stored in a password manager** with sync and a backup, not only in one phone or browser. Long unique passwords and recovery codes are kept there too;
 - **less protected fallback login methods are turned off:** SMS and voice calls as a second factor, recovery through email without a second factor. An account is only as protected as the weakest login method that is allowed;
 - **the email linked to the account is protected the same way** - otherwise access will be recovered through it;
-- **tokens and keys:** the smallest permissions and an expiry date, a regular review of issued tokens, SSH keys and connected apps;
+- **tokens and keys:** forbid classic or unscoped personal access tokens in organizations; allow only fine-grained tokens scoped to specific repositories with the smallest permissions, a short expiry date, administrator approval and SSO/SAML authorization; prefer short-lived credentials (OIDC, GitHub Apps, SSH certificates) over static user tokens; regularly review issued tokens, SSH keys and connected apps;
+- **least privilege and persistence control:** audit repository collaborators and teams and remove unnecessary write or admin access and inactive members (on GitHub: `gh api repos/{owner}/{repo}/collaborators`); forbid deploy keys with write access unless justified and reviewed (`gh api repos/{owner}/{repo}/keys`); require administrator approval before third-party OAuth Apps or GitHub Apps can access organization repositories;
+- **audit log and anomaly alerts** (medium priority for organizations): monitor and alert on new tokens, new SSH or deploy keys, newly installed apps, changes to branch or environment protection rules, workflow edits and bulk cloning of private repositories;
 - in an organization a phishing-resistant login factor is required for all members, and rights are given by the principle of least privilege
 
-This cannot be checked from the repository files. If the platform gives such data through the API (whether a second factor is required in the organization, the list of members without it), check it. Ask about the rest in the report and attach instructions on what to turn on and where
+Most of these settings cannot be checked from the repository files. Use read-only platform API calls where available to check collaborator permissions, deploy keys and organization two-factor requirements. For organization-level token policies, SSO enforcement and audit-log alerts that cannot be read via API, set ❓ and ask in the report, with instructions on what to turn on and where
 
 ---
 
